@@ -97,7 +97,7 @@ def function(data,
              max_gap_param=250, 
              max_diag_diff_param=150, 
              overlap_factor_param=0.5, 
-             min_anchors_param=3): # Added parameters with defaults
+             min_anchors_param=1): # Changed default min_anchors_param to 1
     if not isinstance(data, np.ndarray) or data.size == 0:
         return ""
 
@@ -170,8 +170,9 @@ def function(data,
                                                 kmersize, MAX_GAP_BETWEEN_ANCHORS, MAX_DIAGONAL_DIFFERENCE, MAX_ALLOWED_OVERLAP)
     
     # 4. Forming Candidate Segments from Chains (Python part)
+    # Modified to be more "brute-force": do not de-duplicate segments by coordinates here.
     MIN_ANCHORS_PER_CHAIN = min_anchors_param 
-    candidate_segments_dict = {} 
+    candidate_segments_list = [] # Changed from candidate_segments_dict
 
     for i in range(n_anchors):
         current_chain_indices_py = []
@@ -190,30 +191,29 @@ def function(data,
             q_start = py_anchors[first_anchor_sorted_idx]['q_s']
             q_end = py_anchors[last_anchor_sorted_idx]['q_e']
             
-            # Use sorted indices to access r_s and r_e from py_anchors
             chain_r_starts = [py_anchors[idx]['r_s'] for idx in current_chain_indices_py]
             chain_r_ends = [py_anchors[idx]['r_e'] for idx in current_chain_indices_py]
             
-            r_start = min(chain_r_starts) if chain_r_starts else 0 # Handle empty list
-            r_end = max(chain_r_ends) if chain_r_ends else 0 # Handle empty list
+            r_start = min(chain_r_starts) if chain_r_starts else 0 
+            r_end = max(chain_r_ends) if chain_r_ends else 0 
             
-            segment_key = (q_start, q_end, r_start, r_end)
-            # dp_score[i] is the score of the chain ending at sorted anchor i
             current_segment_score = dp_score[i] 
 
-            if segment_key not in candidate_segments_dict or current_segment_score > candidate_segments_dict[segment_key]['score']:
-                candidate_segments_dict[segment_key] = {
-                    'q_s': q_start, 'q_e': q_end,
-                    'r_s': r_start, 'r_e': r_end,
-                    'score': current_segment_score, # This is chain score
-                    'strand': py_anchors[i]['strand'] 
-                }
+            # Append all segments derived from valid chains
+            candidate_segments_list.append({
+                'q_s': q_start, 'q_e': q_end,
+                'r_s': r_start, 'r_e': r_end,
+                'score': current_segment_score, 
+                'strand': py_anchors[i]['strand'] 
+            })
     
-    candidate_segments = list(candidate_segments_dict.values())
+    # candidate_segments = list(candidate_segments_dict.values()) # No longer needed
+    candidate_segments = candidate_segments_list # Use the list directly
 
     # 5. Filtering and Selecting Non-Overlapping Segments
-    MIN_QUERY_LEN = 30 
-    filtered_segments_py = [seg for seg in candidate_segments if (seg['q_e'] - seg['q_s']) >= MIN_QUERY_LEN]
+    # MIN_QUERY_LEN = 30 # Removed this filter to be more "brute-force"
+    # filtered_segments_py = [seg for seg in candidate_segments if (seg['q_e'] - seg['q_s']) >= MIN_QUERY_LEN]
+    filtered_segments_py = candidate_segments # Pass all candidate segments
 
     if not filtered_segments_py:
         return ""
