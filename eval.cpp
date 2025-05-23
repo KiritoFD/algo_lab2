@@ -287,7 +287,7 @@ int main_eval() {
 
 // Add a wrapper main function that calls main_eval
 // This main will be used when compiling eval.cpp alone
-#ifndef PARAMETER_TUNING
+#if !defined(PARAMETER_TUNING) && !defined(GRADIENT_OPTIMIZATION) // Updated guard
 int main() {
     return main_eval();
 }

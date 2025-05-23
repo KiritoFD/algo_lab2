@@ -45,13 +45,24 @@ private:
     // Random number generator
     std::mt19937 rng;
 
-    // Parameter ranges and steps
+    // Parameter ranges and base steps
     const int MIN_GAP = 100, MAX_GAP = 400, STEP_GAP = 10;
     const int MIN_DIAG = 50, MAX_DIAG = 250, STEP_DIAG = 10;
     const double MIN_OVERLAP = 0.2, MAX_OVERLAP = 0.8, STEP_OVERLAP = 0.05;
     const int MIN_ANCHORS = 1, MAX_ANCHORS = 5, STEP_ANCHORS = 1;
 
     std::ofstream log_file;
+
+    // Adaptive step control for each parameter
+    struct ParameterControl {
+        double step_multiplier = 1.0;
+        const double max_multiplier = 3.0; 
+        const double min_multiplier = 0.2; 
+        const double increase_factor = 1.15; 
+        const double decrease_factor = 0.85; 
+    };
+    std::vector<ParameterControl> param_controls; // Index 0:gap, 1:diag, 2:overlap, 3:anchors
+
 
     // Evaluate parameters on a single dataset
     int evaluate_on_dataset(const Parameters& params,
@@ -108,6 +119,7 @@ public:
     GradientOptimizer(const std::string& r1_file, const std::string& q1_file,
                       const std::string& r2_file, const std::string& q2_file)
         : rng(std::random_device{}()) {
+        param_controls.resize(4); 
         log_file.open("gradient_optimizer_log.txt");
         log_file << "Dataset,Iteration,Type,Gap,DiagDiff,OverlapFactor,MinAnchors,Score\n";
 
@@ -134,89 +146,211 @@ public:
         const std::string& dataset_name,
         const std::vector<std::tuple<int, int, int, int>>& current_data,
         const std::string& current_ref, const std::string& current_query,
-        int max_iterations = 100) {
+        int max_iterations = 500) {
 
-        std::cout << "\n---- Optimizing for " << dataset_name << " using Gradient Ascent ----" << std::endl;
+        std::cout << "\n---- Optimizing for " << dataset_name << " using Patient Adaptive Gradient Ascent ----" << std::endl;
+
+        // Reset parameter controls for each new dataset optimization run
+        for(auto& pc : param_controls) {
+            pc.step_multiplier = 1.0;
+        }
 
         Parameters current_params = generate_random_parameters();
         int current_score = evaluate_on_dataset(current_params, current_data, current_ref, current_query);
+        Parameters overall_best_params = current_params;
+        int overall_best_score = current_score;
 
         std::cout << "Initial Random Params: " << current_params.toString() << " -> Score: " << current_score << std::endl;
         log_file << dataset_name << ",0,Initial," << current_params.max_gap << "," << current_params.max_diag_diff
                  << "," << current_params.overlap_factor << "," << current_params.min_anchors << "," << current_score << "\n";
 
+        int no_improvement_streak = 0;
+        const int PATIENCE_BEFORE_STEP_DECREASE = 5; // Only start decreasing step sizes after this many stuck iterations
+        const int max_no_improvement_streak_for_jump = 30; 
+
 
         for (int iter = 0; iter < max_iterations; ++iter) {
-            Parameters best_neighbor_params = current_params;
-            int best_neighbor_score = current_score;
-            bool improved = false;
+            Parameters candidate_next_params = current_params; 
+            bool any_param_direction_improved_individually = false;
+            bool param_contributed_to_candidate[4] = {false, false, false, false}; 
 
-            // Explore neighbors by changing one parameter at a time
-            for (int param_idx = 0; param_idx < 4; ++param_idx) { // 4 parameters
-                for (int direction = -1; direction <= 1; direction += 2) { // -1 and 1
-                    Parameters neighbor_params = current_params;
-                    std::string change_type = "";
+            // Determine actual step sizes using dynamic multipliers
+            int actual_step_gap = std::max(1, static_cast<int>(STEP_GAP * param_controls[0].step_multiplier));
+            int actual_step_diag = std::max(1, static_cast<int>(STEP_DIAG * param_controls[1].step_multiplier));
+            double actual_step_overlap = std::max(0.01, STEP_OVERLAP * param_controls[2].step_multiplier);
+            int actual_step_anchors = std::max(1, static_cast<int>(STEP_ANCHORS * param_controls[3].step_multiplier));
 
-                    if (param_idx == 0) { // max_gap
-                        neighbor_params.max_gap += direction * STEP_GAP;
-                        neighbor_params.max_gap = std::max(MIN_GAP, std::min(MAX_GAP, neighbor_params.max_gap));
-                        change_type = "max_gap";
-                    } else if (param_idx == 1) { // max_diag_diff
-                        neighbor_params.max_diag_diff += direction * STEP_DIAG;
-                        neighbor_params.max_diag_diff = std::max(MIN_DIAG, std::min(MAX_DIAG, neighbor_params.max_diag_diff));
-                        change_type = "max_diag_diff";
-                    } else if (param_idx == 2) { // overlap_factor
-                        neighbor_params.overlap_factor += direction * STEP_OVERLAP;
-                        neighbor_params.overlap_factor = std::max(MIN_OVERLAP, std::min(MAX_OVERLAP, neighbor_params.overlap_factor));
-                         // Ensure discrete steps for overlap factor if desired, or round
-                        neighbor_params.overlap_factor = std::round(neighbor_params.overlap_factor / STEP_OVERLAP) * STEP_OVERLAP;
-                        change_type = "overlap_factor";
-                    } else { // min_anchors
-                        neighbor_params.min_anchors += direction * STEP_ANCHORS;
-                        neighbor_params.min_anchors = std::max(MIN_ANCHORS, std::min(MAX_ANCHORS, neighbor_params.min_anchors));
-                        change_type = "min_anchors";
+            // --- Assess max_gap (param_idx = 0) ---
+            Parameters temp_params_gap_inc = current_params;
+            temp_params_gap_inc.max_gap = std::min(MAX_GAP, current_params.max_gap + actual_step_gap);
+            int score_gap_inc = evaluate_on_dataset(temp_params_gap_inc, current_data, current_ref, current_query);
+            log_file << dataset_name << "," << iter + 1 << ",Explore_max_gap_Inc(M" << param_controls[0].step_multiplier << ")," << temp_params_gap_inc.max_gap << "," << temp_params_gap_inc.max_diag_diff << "," << temp_params_gap_inc.overlap_factor << "," << temp_params_gap_inc.min_anchors << "," << score_gap_inc << "\n";
+
+            Parameters temp_params_gap_dec = current_params;
+            temp_params_gap_dec.max_gap = std::max(MIN_GAP, current_params.max_gap - actual_step_gap);
+            int score_gap_dec = evaluate_on_dataset(temp_params_gap_dec, current_data, current_ref, current_query);
+            log_file << dataset_name << "," << iter + 1 << ",Explore_max_gap_Dec(M" << param_controls[0].step_multiplier << ")," << temp_params_gap_dec.max_gap << "," << temp_params_gap_dec.max_diag_diff << "," << temp_params_gap_dec.overlap_factor << "," << temp_params_gap_dec.min_anchors << "," << score_gap_dec << "\n";
+
+            if (score_gap_inc > current_score && score_gap_inc >= score_gap_dec) {
+                candidate_next_params.max_gap = temp_params_gap_inc.max_gap;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[0] = (candidate_next_params.max_gap != current_params.max_gap);
+            } else if (score_gap_dec > current_score) {
+                candidate_next_params.max_gap = temp_params_gap_dec.max_gap;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[0] = (candidate_next_params.max_gap != current_params.max_gap);
+            }
+
+            // --- Assess max_diag_diff (param_idx = 1) ---
+            Parameters temp_params_diag_inc = current_params; 
+            temp_params_diag_inc.max_diag_diff = std::min(MAX_DIAG, current_params.max_diag_diff + actual_step_diag);
+            int score_diag_inc_val = evaluate_on_dataset(temp_params_diag_inc, current_data, current_ref, current_query); // Renamed to avoid conflict
+            log_file << dataset_name << "," << iter + 1 << ",Explore_max_diag_diff_Inc(M" << param_controls[1].step_multiplier << ")," << temp_params_diag_inc.max_gap << "," << temp_params_diag_inc.max_diag_diff << "," << temp_params_diag_inc.overlap_factor << "," << temp_params_diag_inc.min_anchors << "," << score_diag_inc_val << "\n";
+
+            Parameters temp_params_diag_dec = current_params;
+            temp_params_diag_dec.max_diag_diff = std::max(MIN_DIAG, current_params.max_diag_diff - actual_step_diag);
+            int score_diag_dec_val = evaluate_on_dataset(temp_params_diag_dec, current_data, current_ref, current_query); // Renamed to avoid conflict
+            log_file << dataset_name << "," << iter + 1 << ",Explore_max_diag_diff_Dec(M" << param_controls[1].step_multiplier << ")," << temp_params_diag_dec.max_gap << "," << temp_params_diag_dec.max_diag_diff << "," << temp_params_diag_dec.overlap_factor << "," << temp_params_diag_dec.min_anchors << "," << score_diag_dec_val << "\n";
+            
+            if (score_diag_inc_val > current_score && score_diag_inc_val >= score_diag_dec_val) {
+                candidate_next_params.max_diag_diff = temp_params_diag_inc.max_diag_diff;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[1] = (candidate_next_params.max_diag_diff != current_params.max_diag_diff);
+            } else if (score_diag_dec_val > current_score) {
+                candidate_next_params.max_diag_diff = temp_params_diag_dec.max_diag_diff;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[1] = (candidate_next_params.max_diag_diff != current_params.max_diag_diff);
+            }
+
+            // --- Assess overlap_factor (param_idx = 2) ---
+            Parameters temp_params_overlap_inc = current_params;
+            temp_params_overlap_inc.overlap_factor = std::min(MAX_OVERLAP, current_params.overlap_factor + actual_step_overlap);
+            temp_params_overlap_inc.overlap_factor = std::round(temp_params_overlap_inc.overlap_factor / STEP_OVERLAP) * STEP_OVERLAP; 
+            int score_overlap_inc_val = evaluate_on_dataset(temp_params_overlap_inc, current_data, current_ref, current_query); // Renamed
+            log_file << dataset_name << "," << iter + 1 << ",Explore_overlap_factor_Inc(M" << param_controls[2].step_multiplier << ")," << temp_params_overlap_inc.max_gap << "," << temp_params_overlap_inc.max_diag_diff << "," << temp_params_overlap_inc.overlap_factor << "," << temp_params_overlap_inc.min_anchors << "," << score_overlap_inc_val << "\n";
+
+            Parameters temp_params_overlap_dec = current_params;
+            temp_params_overlap_dec.overlap_factor = std::max(MIN_OVERLAP, current_params.overlap_factor - actual_step_overlap);
+            temp_params_overlap_dec.overlap_factor = std::round(temp_params_overlap_dec.overlap_factor / STEP_OVERLAP) * STEP_OVERLAP; 
+            int score_overlap_dec_val = evaluate_on_dataset(temp_params_overlap_dec, current_data, current_ref, current_query); // Renamed
+            log_file << dataset_name << "," << iter + 1 << ",Explore_overlap_factor_Dec(M" << param_controls[2].step_multiplier << ")," << temp_params_overlap_dec.max_gap << "," << temp_params_overlap_dec.max_diag_diff << "," << temp_params_overlap_dec.overlap_factor << "," << temp_params_overlap_dec.min_anchors << "," << score_overlap_dec_val << "\n";
+
+            if (score_overlap_inc_val > current_score && score_overlap_inc_val >= score_overlap_dec_val) {
+                candidate_next_params.overlap_factor = temp_params_overlap_inc.overlap_factor;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[2] = (std::abs(candidate_next_params.overlap_factor - current_params.overlap_factor) > 1e-6);
+            } else if (score_overlap_dec_val > current_score) {
+                candidate_next_params.overlap_factor = temp_params_overlap_dec.overlap_factor;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[2] = (std::abs(candidate_next_params.overlap_factor - current_params.overlap_factor) > 1e-6);
+            }
+
+            // --- Assess min_anchors (param_idx = 3) ---
+            Parameters temp_params_anchors_inc = current_params;
+            temp_params_anchors_inc.min_anchors = std::min(MAX_ANCHORS, current_params.min_anchors + actual_step_anchors);
+            int score_anchors_inc_val = evaluate_on_dataset(temp_params_anchors_inc, current_data, current_ref, current_query); // Renamed
+            log_file << dataset_name << "," << iter + 1 << ",Explore_min_anchors_Inc(M" << param_controls[3].step_multiplier << ")," << temp_params_anchors_inc.max_gap << "," << temp_params_anchors_inc.max_diag_diff << "," << temp_params_anchors_inc.overlap_factor << "," << temp_params_anchors_inc.min_anchors << "," << score_anchors_inc_val << "\n";
+
+            Parameters temp_params_anchors_dec = current_params;
+            temp_params_anchors_dec.min_anchors = std::max(MIN_ANCHORS, current_params.min_anchors - actual_step_anchors);
+            int score_anchors_dec_val = evaluate_on_dataset(temp_params_anchors_dec, current_data, current_ref, current_query); // Renamed
+            log_file << dataset_name << "," << iter + 1 << ",Explore_min_anchors_Dec(M" << param_controls[3].step_multiplier << ")," << temp_params_anchors_dec.max_gap << "," << temp_params_anchors_dec.max_diag_diff << "," << temp_params_anchors_dec.overlap_factor << "," << temp_params_anchors_dec.min_anchors << "," << score_anchors_dec_val << "\n";
+
+            if (score_anchors_inc_val > current_score && score_anchors_inc_val >= score_anchors_dec_val) {
+                candidate_next_params.min_anchors = temp_params_anchors_inc.min_anchors;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[3] = (candidate_next_params.min_anchors != current_params.min_anchors);
+            } else if (score_anchors_dec_val > current_score) {
+                candidate_next_params.min_anchors = temp_params_anchors_dec.min_anchors;
+                any_param_direction_improved_individually = true;
+                param_contributed_to_candidate[3] = (candidate_next_params.min_anchors != current_params.min_anchors);
+            }
+            
+            candidate_next_params.max_gap = std::max(MIN_GAP, std::min(MAX_GAP, candidate_next_params.max_gap));
+            candidate_next_params.max_diag_diff = std::max(MIN_DIAG, std::min(MAX_DIAG, candidate_next_params.max_diag_diff));
+            candidate_next_params.overlap_factor = std::max(MIN_OVERLAP, std::min(MAX_OVERLAP, candidate_next_params.overlap_factor));
+            candidate_next_params.min_anchors = std::max(MIN_ANCHORS, std::min(MAX_ANCHORS, candidate_next_params.min_anchors));
+
+
+            if (any_param_direction_improved_individually) {
+                int new_combined_score = evaluate_on_dataset(candidate_next_params, current_data, current_ref, current_query);
+                log_file << dataset_name << "," << iter + 1 << ",TryCombined," << candidate_next_params.max_gap << "," << candidate_next_params.max_diag_diff << "," << candidate_next_params.overlap_factor << "," << candidate_next_params.min_anchors << "," << new_combined_score << "\n";
+
+                if (new_combined_score > current_score) {
+                    current_params = candidate_next_params;
+                    current_score = new_combined_score;
+                    no_improvement_streak = 0; 
+                    std::cout << "Iter " << iter + 1 << ": Improved (Combined) to Score " << current_score
+                              << " with Params: " << current_params.toString() << std::endl;
+                    log_file << dataset_name << "," << iter + 1 << ",Update," << current_params.max_gap << "," << current_params.max_diag_diff
+                             << "," << current_params.overlap_factor << "," << current_params.min_anchors << "," << current_score << "\n";
+
+                    if (current_score > overall_best_score) {
+                        overall_best_score = current_score;
+                        overall_best_params = current_params;
+                        std::cout << "Iter " << iter + 1 << ": *** New Overall Best Score: " << overall_best_score 
+                                  << " with Params: " << overall_best_params.toString() << " ***" << std::endl;
                     }
-
-                    // Avoid re-evaluating if parameter didn't change (due to bounds)
-                    if (neighbor_params.max_gap == current_params.max_gap &&
-                        neighbor_params.max_diag_diff == current_params.max_diag_diff &&
-                        std::abs(neighbor_params.overlap_factor - current_params.overlap_factor) < 1e-5 &&
-                        neighbor_params.min_anchors == current_params.min_anchors) {
-                        continue;
+                    // Adapt step multipliers: increase for contributing, gently decrease for non-contributing
+                    for(int i=0; i<4; ++i) {
+                        if(param_contributed_to_candidate[i]) { 
+                            param_controls[i].step_multiplier = std::min(param_controls[i].max_multiplier, param_controls[i].step_multiplier * param_controls[i].increase_factor);
+                        } else { 
+                            // Only decrease if it's not already very small
+                            if (param_controls[i].step_multiplier > param_controls[i].min_multiplier * 1.1) // Avoid over-shrinking
+                                param_controls[i].step_multiplier = std::max(param_controls[i].min_multiplier, param_controls[i].step_multiplier * 0.95); // Very gentle decrease for non-contributors
+                        }
                     }
-                    
-                    int neighbor_score = evaluate_on_dataset(neighbor_params, current_data, current_ref, current_query);
-                    log_file << dataset_name << "," << iter + 1 << ",Explore_" << change_type << (direction > 0 ? "_Inc" : "_Dec") << ","
-                             << neighbor_params.max_gap << "," << neighbor_params.max_diag_diff << ","
-                             << neighbor_params.overlap_factor << "," << neighbor_params.min_anchors << "," << neighbor_score << "\n";
-
-                    if (neighbor_score > best_neighbor_score) {
-                        best_neighbor_score = neighbor_score;
-                        best_neighbor_params = neighbor_params;
-                        improved = true;
+                } else { // Combined move did not improve
+                    no_improvement_streak++;
+                    std::cout << "Iter " << iter + 1 << ": Combined changes did not improve. Streak: " << no_improvement_streak << std::endl;
+                    if (no_improvement_streak > PATIENCE_BEFORE_STEP_DECREASE) {
+                        for(int i=0; i<4; ++i) {
+                            param_controls[i].step_multiplier = std::max(param_controls[i].min_multiplier, param_controls[i].step_multiplier * param_controls[i].decrease_factor);
+                        }
+                    }
+                }
+            } else { // No individual parameter change improved score
+                no_improvement_streak++;
+                std::cout << "Iter " << iter + 1 << ": No individual param change improved. Streak: " << no_improvement_streak << std::endl;
+                if (no_improvement_streak > PATIENCE_BEFORE_STEP_DECREASE) {
+                    for(int i=0; i<4; ++i) {
+                        param_controls[i].step_multiplier = std::max(param_controls[i].min_multiplier, param_controls[i].step_multiplier * param_controls[i].decrease_factor);
                     }
                 }
             }
 
-            if (improved) {
-                current_params = best_neighbor_params;
-                current_score = best_neighbor_score;
-                std::cout << "Iter " << iter + 1 << ": Improved to Score " << current_score
-                          << " with Params: " << current_params.toString() << std::endl;
-                log_file << dataset_name << "," << iter + 1 << ",Update," << current_params.max_gap << "," << current_params.max_diag_diff
+            if (no_improvement_streak >= max_no_improvement_streak_for_jump) {
+                std::cout << "Iter " << iter + 1 << ": Stuck for " << no_improvement_streak 
+                          << " iterations. Performing a random jump." << std::endl;
+                current_params = generate_random_parameters();
+                current_score = evaluate_on_dataset(current_params, current_data, current_ref, current_query);
+                no_improvement_streak = 0; 
+                // Reset step multipliers after a jump
+                for(int i=0; i<4; ++i) {
+                    param_controls[i].step_multiplier = 1.0;
+                }
+                std::cout << "Iter " << iter + 1 << ": Jumped to new random Params: " << current_params.toString() 
+                          << " -> Score: " << current_score << std::endl;
+                log_file << dataset_name << "," << iter + 1 << ",Jump," << current_params.max_gap << "," << current_params.max_diag_diff
                          << "," << current_params.overlap_factor << "," << current_params.min_anchors << "," << current_score << "\n";
-            } else {
-                std::cout << "Iter " << iter + 1 << ": No improvement found. Stopping." << std::endl;
-                break; // Local optimum reached
+                
+                if (current_score > overall_best_score) {
+                    overall_best_score = current_score;
+                    overall_best_params = current_params;
+                     std::cout << "Iter " << iter + 1 << ": *** New Overall Best Score (post-jump): " << overall_best_score 
+                               << " with Params: " << overall_best_params.toString() << " ***" << std::endl;
+                }
             }
         }
-        std::cout << "Optimization for " << dataset_name << " finished." << std::endl;
-        std::cout << "Best Params: " << current_params.toString() << " -> Score: " << current_score << std::endl;
+        std::cout << "Optimization for " << dataset_name << " finished after " << max_iterations << " iterations." << std::endl;
+        std::cout << "Overall Best Params for " << dataset_name << ": " << overall_best_params.toString() 
+                  << " -> Score: " << overall_best_score << std::endl;
         
-        std::string final_tuples_str = function(current_data, current_params.max_gap, current_params.max_diag_diff, current_params.overlap_factor, current_params.min_anchors);
+        std::string final_tuples_str = function(current_data, overall_best_params.max_gap, overall_best_params.max_diag_diff, overall_best_params.overlap_factor, overall_best_params.min_anchors);
         display_alignment_details(final_tuples_str, dataset_name);
 
-        return current_params;
+        return overall_best_params;
     }
 
     void run_optimization() {
@@ -224,10 +358,10 @@ public:
         Parameters best_params_ds2 = optimize_for_dataset("Dataset2", data2, ref2, que2);
 
         std::cout << "\n--- Final Results ---" << std::endl;
-        std::cout << "Best parameters for Dataset 1: " << best_params_ds1.toString() << std::endl;
+        std::cout << "Overall Best parameters for Dataset 1: " << best_params_ds1.toString() << std::endl; // Changed to reflect overall best
         std::cout << "Score: " << evaluate_on_dataset(best_params_ds1, data1, ref1, que1) << std::endl;
 
-        std::cout << "Best parameters for Dataset 2: " << best_params_ds2.toString() << std::endl;
+        std::cout << "Overall Best parameters for Dataset 2: " << best_params_ds2.toString() << std::endl; // Changed to reflect overall best
         std::cout << "Score: " << evaluate_on_dataset(best_params_ds2, data2, ref2, que2) << std::endl;
 
         // Cross-evaluation

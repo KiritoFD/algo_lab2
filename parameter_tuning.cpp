@@ -404,7 +404,7 @@ private:
             int ref_start = points[i+2];
             int ref_end = points[i+3];
             int query_length = query_end - query_start;
-            int ref_length = ref_end - ref_start;
+            // int ref_length = ref_end - ref_start; // Removed unused variable
             
             total_query_length += query_length;
             
