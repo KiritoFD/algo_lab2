@@ -165,28 +165,28 @@ from run import function
 # Result
 
 # %%
-if __name__ == "__main__":
-    # Process Dataset 1
-    print("Processing Dataset 1...")
-    data1 = seq2hashtable_multi_test(ref1, que1, kmersize=9, shift=1)
-    print(f"Dataset 1 k-mer matches shape: {data1.shape}")
-    tuples_str1 = str(function(data1))
-    print("Alignment Result for Dataset 1:")
-    formatted_output1 = format_tuples_for_display(tuples_str1)
-    print(formatted_output1)
-    score1 = calculate_value(tuples_str1, ref1, que1)
-    print(f"Final Score for Dataset 1: {score1}\n")
+# Process Dataset 1
+print("Processing Dataset 1...")
+data1 = seq2hashtable_multi_test(ref1, que1, kmersize=9, shift=1)
+print(f"Dataset 1 k-mer matches shape: {data1.shape}")
+tuples_str1 = str(function(data1))
+print("Alignment Result for Dataset 1:")
+formatted_output1 = format_tuples_for_display(tuples_str1)
+print(formatted_output1)
+score1 = calculate_value(tuples_str1, ref1, que1)
+print(f"Final Score for Dataset 1: {score1}\n")
 
-    # Process Dataset 2
-    print("Processing Dataset 2...")
-    data2 = seq2hashtable_multi_test(ref2, que2, kmersize=9, shift=1)
-    print(f"Dataset 2 k-mer matches shape: {data2.shape}")
-    tuples_str2 = str(function(data2))
-    print("Alignment Result for Dataset 2:")
-    formatted_output2 = format_tuples_for_display(tuples_str2)
-    print(formatted_output2)
-    score2 = calculate_value(tuples_str2, ref2, que2)
-    print(f"Final Score for Dataset 2: {score2}")
+# Process Dataset 2
+print("Processing Dataset 2...")
+data2 = seq2hashtable_multi_test(ref2, que2, kmersize=9, shift=1)
+print(f"Dataset 2 k-mer matches shape: {data2.shape}")
+tuples_str2 = str(function(data2))
+print("Alignment Result for Dataset 2:")
+formatted_output2 = format_tuples_for_display(tuples_str2)
+print(formatted_output2)
+score2 = calculate_value(tuples_str2, ref2, que2)
+print(f"Final Score for Dataset 2: {score2}")
+
 # %%
 #Score
 # score = calculate_value(tuples_str, ref, query) # Now done per dataset
